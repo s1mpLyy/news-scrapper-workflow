@@ -1,0 +1,10 @@
+# Never commit real exports containing credentials or secrets
+*credentials*
+*.env
+.env*
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
