@@ -31,4 +31,9 @@ Open a GitHub issue with:
 ## Style
 
 - Code nodes: plain JavaScript, no external npm packages (only Node built-ins like `crypto`)
-- Prefer contin
+- Prefer continue-on-error + fallbacks over hard failures — one bad feed/article must never abort the run
+- Keep the API payload contract backward-compatible, or document the break clearly in the PR
+
+## License
+
+By contributing you agree your contributions are licensed under the MIT License.

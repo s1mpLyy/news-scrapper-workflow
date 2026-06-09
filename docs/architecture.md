@@ -60,4 +60,19 @@ Schedule ──────┴─► Config ─► Prepare Sources ─► Per So
 
 **Translate** — OpenAI node. The prompt is built dynamically from `Config.languages`: it sends the per-language field object plus the original source text, and instructs the model to fill only empty fields (suffix = target language) and return filled ones unchanged. Because the keys are dynamic, output is prompt-enforced JSON (no static schema) parsed defensively downstream. Continue-on-error: if the call fails, the pipeline still proceeds.
 
-**Build Payload** — merges the LLM output back in. A depth-limited recursive search (`findPayload`) locates the language-field object anywhere in t
+**Build Payload** — merges the LLM output back in. A depth-limited recursive search (`findPayload`) locates the language-field object anywhere in the response, including inside JSON strings — and it works identically when translation was skipped (the article itself carries the fields). A per-language fallback chain (own field → same field in another language → source text → title) guarantees every field is non-empty. Returns `{ id, payload }` where `payload` is exactly what gets POSTed.
+
+**POST Article** — URL and auth header come from Config via expressions; the body is `Build Payload`'s `payload` object, so language fields adapt automatically. `fullResponse` + `neverError` so the status code reaches the next node.
+
+**Mark Seen** — writes the article ID into the dedupe store **only on 2xx**, then loops back. Failed posts are retried on subsequent runs.
+
+## Deduplication
+
+`$getWorkflowStaticData('global').seenIds` maps `sha256(url).slice(0,16)` → timestamp. Properties:
+
+- persists between executions, but **only for active (scheduled/webhook) runs** — manual executions read/write a throwaway copy
+- grows unbounded; for very large source lists consider periodically pruning old entries or moving dedupe to your API (e.g., unique constraint on `source_url`)
+
+## Error-handling philosophy
+
+Every external interaction (RSS fetch, page fetch, LLM, POST) uses `alwaysOutputData` and/or `onError: continueRegularOutput`. The loop always completes; failures degrade individual articles (summary instead of full text, fallback text instead of a missing translation, retry next run) rather than aborting the run.

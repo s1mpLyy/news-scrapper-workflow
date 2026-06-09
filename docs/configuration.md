@@ -76,4 +76,17 @@ With more languages, the three `title_<lang>` / `short_description_<lang>` / `de
 
 Guarantees:
 
-- Every text field is 
+- Every text field is **non-empty** (fallback chain: translation → same field in another configured language → original source text → title)
+- `short_description_*` ≤ `shortDescriptionMaxChars`
+- `image` is always a URL (placeholder if nothing was found)
+- `status` is fixed at `2` — change it in the *Build Payload* node if your API uses different status codes
+
+A **2xx** response marks the article as published (it won't be sent again). Any other response leaves it unmarked, so it's retried on the next run.
+
+## Common customizations
+
+- **Different LLM** — swap the model in the *Translate* node; any chat model that reliably outputs JSON works
+- **No translation at all** — just keep one language and matching feeds; the Translate node is bypassed automatically
+- **More/fewer items per run** — `maxItemsPerFeed` in Config
+- **Different schedule** — edit the *Schedule* trigger node
+- **Different status codes / extra payload fields** — edit the return object in *Build Payload*

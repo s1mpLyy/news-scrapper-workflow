@@ -51,4 +51,14 @@ Otherwise open the **Translate** node and select (or create) your OpenAI credent
 
 Click **Execute workflow** (the manual *Run* trigger). Watch the *Per Source* loop process each feed. Check:
 
-- *Skip Source* outputs show ski
+- *Skip Source* outputs show skipped feeds and why (`no_rss_items`, `all_already_seen`, `no_usable_url`)
+- *Needs Translation?* routes articles correctly (the "false" branch should fire for already-complete articles)
+- *POST Article* responses return 2xx from your API
+- *Mark Seen* shows `posted: true`
+
+## 6. Go to production
+
+1. Enable the **Schedule** trigger node (default: every 6 hours — adjust as needed)
+2. Activate the workflow (toggle top-right)
+
+> Dedupe only persists across **active** runs. Manual test runs don't remember what they posted, so re-running a test may POST duplicates — your API should ideally reject duplicate `source_url`s as a second line of defense.
