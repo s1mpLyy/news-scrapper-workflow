@@ -56,6 +56,7 @@ Each node carries an explanatory note inside n8n, and sticky notes on the canvas
 | [docs/configuration.md](docs/configuration.md) | Every config option, languages, sources/categories, the API payload contract |
 | [docs/architecture.md](docs/architecture.md) | Node-by-node walkthrough, dedupe, error handling |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |
+| [AGENTS.md](AGENTS.md) | Guide for AI coding agents (repo map, invariants, safe-editing rules) |
 
 ## Requirements
 
