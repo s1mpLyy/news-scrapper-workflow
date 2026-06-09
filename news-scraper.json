@@ -1,0 +1,690 @@
+{
+  "name": "News Scraper (RSS → Translate → Publish)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 📰 News Scraper — RSS → (Translate) → Publish\n\nFetches articles from your RSS feeds, dedupes them, enriches them with an\nimage + full text from the article page, optionally **translates them into\nevery language you configure**, and POSTs the result to your own API.\n\n### Quick start\n1. Open **⚙️ Config** → set your API endpoint + auth (and `languages`,\n   default `['en']` = English only).\n2. Open **📰 Prepare Sources** → add your feeds & category IDs.\n3. *Only if you use more than one language or foreign-language feeds:*\n   select your **OpenAI credential** on the *Translate* node.\n4. Hit **Execute workflow** to test, then enable the *Schedule* trigger.\n\n📖 Full docs: see `README.md` and `docs/` in the repository.",
+        "width": 540,
+        "height": 380,
+        "color": 4
+      },
+      "id": "📖-read-me-first",
+      "name": "📖 Read me first",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1264,
+        -288
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## ✏️ EDIT THESE TWO NODES\n\n**⚙️ Config** — API endpoint, auth header, **languages** (default\n`['en']`; add codes like `['en','es']` to publish multilingual),\nitem limits, placeholder image.\n\n**📰 Prepare Sources** — your RSS feeds and the slug → category-ID map\nfor your backend. Everything else works without changes.",
+        "width": 460,
+        "height": 240,
+        "color": 5
+      },
+      "id": "✏️-edit-these",
+      "name": "✏️ Edit these",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -704,
+        -16
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 🔁 Per-source loop\n\n*Per Source* processes one feed at a time (isolates failures: one broken\nfeed never kills the run). *Fetch RSS* and most downstream nodes use\n**continue-on-error**, so the loop always completes.\n\n*Build Articles* takes the newest N items, skips items already posted\n(dedupe via workflow static data), generates one field set per configured\nlanguage, and emits a `_skip` marker when a feed yields nothing —\n*Has Articles?* routes those straight back to the loop.",
+        "width": 560,
+        "height": 280,
+        "color": 7
+      },
+      "id": "🔁-loop-notes",
+      "name": "🔁 Loop notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -288,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 🖼️ Enrich + 🌐 Translate (optional)\n\n*Fetch Article Page* downloads the article HTML (never errors, 8s timeout).\n*Resolve Image* picks the best image (RSS → og:image → twitter:image) and\nextracts the full article text when it beats the feed summary.\n\n*Needs Translation?* checks if any configured language is still missing —\nif not (e.g. default English-only with English feeds), **the LLM is\nskipped entirely** and no OpenAI key is needed. Otherwise *Translate*\nfills ONLY the empty language fields; filled fields pass through\nunchanged. If the LLM fails, the article still publishes via fallbacks.",
+        "width": 620,
+        "height": 300,
+        "color": 7
+      },
+      "id": "🖼️-enrich-+-translate",
+      "name": "🖼️ Enrich + translate",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        640,
+        528
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 🚀 Publish\n\n*Build Payload* assembles the final object with one field set per\nconfigured language (guaranteed non-empty). *POST Article* sends it to\n`Config.apiUrl` with your auth header. *Mark Seen* records the article\nas published **only on a 2xx response** — failures are retried on the\nnext run.\n\nPayload contract → `docs/configuration.md`.",
+        "width": 560,
+        "height": 260,
+        "color": 7
+      },
+      "id": "🚀-publish-notes",
+      "name": "🚀 Publish notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1488,
+        528
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "trigger-manual",
+      "name": "Run",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -896,
+        144
+      ],
+      "notes": "Manual trigger for testing. For production, enable the Schedule trigger below instead."
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "id": "trigger-schedule",
+      "name": "Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -896,
+        320
+      ],
+      "disabled": true,
+      "notes": "Optional scheduled run (default: every 6 hours). Enable this node and activate the workflow for production. IMPORTANT: the dedupe store (workflow static data) only persists for active/scheduled runs, not manual test runs."
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================================\n// CONFIG -- edit everything here. This node + \"Prepare Sources\" are\n// the ONLY two nodes you need to touch to use this workflow.\n// =====================================================================\nconst CONFIG = {\n  // Where finished articles are POSTed (your backend / CMS endpoint).\n  // See docs/configuration.md for the exact JSON payload your API receives.\n  apiUrl: 'https://YOUR-SITE.example.com/api/v1/articles',\n\n  // Simple header-based auth for the endpoint above.\n  // TIP: for production, prefer an n8n \"Header Auth\" credential on the\n  // \"POST Article\" node instead of keeping the secret in the workflow JSON.\n  authHeaderName: 'X-Api-Key',\n  authHeaderValue: 'YOUR_API_SECRET',\n\n  // -------------------------------------------------------------------\n  // LANGUAGES your published articles must contain (ISO codes).\n  // Article fields are generated PER LANGUAGE: title_en, description_en,\n  // short_description_en, ... title_<lang> for every entry here.\n  //\n  //   ['en']             -> English only (default). No translation, no\n  //                         LLM call, no OpenAI key needed.\n  //   ['en', 'ar']       -> bilingual English + Arabic\n  //   ['en', 'es', 'fr'] -> trilingual, etc.\n  //\n  // Missing languages are auto-filled by the \"Translate\" node, which only\n  // runs when a field is actually empty (e.g. a Spanish feed with\n  // languages ['en'] gets translated; an English feed does not).\n  // Your API must accept the matching field names (title_<lang>, ...).\n  // -------------------------------------------------------------------\n  languages: ['en'],\n\n  // How many of the newest items to take from each feed per run.\n  maxItemsPerFeed: 5,\n\n  // Limits applied to generated text fields.\n  shortDescriptionWords: 30,      // words kept in the short description\n  shortDescriptionMaxChars: 500,  // hard cap on short descriptions before POSTing\n  maxDescriptionChars: 5000,      // cap on full article text (also keeps LLM cost down)\n\n  // Used when neither the RSS item nor the article page provides an image.\n  placeholderImage: 'https://placehold.co/600x400?text=News'\n};\n\nif (!Array.isArray(CONFIG.languages) || CONFIG.languages.length === 0) {\n  throw new Error('CONFIG.languages must be a non-empty array of language codes, e.g. [\\'en\\'].');\n}\n\nreturn [{ json: CONFIG }];"
+      },
+      "id": "config",
+      "name": "Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -672,
+        144
+      ],
+      "notes": "⚙️ EDIT ME — central configuration: API endpoint, auth header, LANGUAGES (default ['en']), per-feed item limit, text length caps, placeholder image. Every other node reads from here.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================================\n// SOURCES & CATEGORIES -- the only other node you need to edit.\n// =====================================================================\n\n// CATEGORIES maps a human-friendly slug (used in SOURCES below) to the\n// numeric category ID expected by YOUR backend. Add as many as you like.\nconst CATEGORIES = {\n  'technology': 1,\n  'business':   2,\n  'news':       3\n};\n\n// SOURCES -- one entry per RSS/Atom feed. Fields:\n//   name         friendly label (used in logs and skip reports)\n//   feedUrl      the RSS/Atom feed URL\n//   lang         ISO code of the language the feed publishes in.\n//                It does NOT have to be one of CONFIG.languages: a feed\n//                in another language is simply translated into every\n//                configured language by the \"Translate\" node.\n//   categorySlug must be a key of CATEGORIES above.\n//\n// The entries below are public, well-known feeds kept as EXAMPLES --\n// replace them with your own.\nconst SOURCES = [\n  { name: 'BBC Technology',    feedUrl: 'https://feeds.bbci.co.uk/news/technology/rss.xml', lang: 'en', categorySlug: 'technology' },\n  { name: 'Engadget',          feedUrl: 'https://www.engadget.com/rss.xml',                 lang: 'en', categorySlug: 'technology' },\n  { name: 'The Verge',         feedUrl: 'https://www.theverge.com/rss/index.xml',           lang: 'en', categorySlug: 'technology' },\n  { name: 'Guardian Business', feedUrl: 'https://www.theguardian.com/uk/business/rss',      lang: 'en', categorySlug: 'business' },\n  { name: 'BBC News',          feedUrl: 'https://feeds.bbci.co.uk/news/rss.xml',            lang: 'en', categorySlug: 'news' }\n];\n\n// --------------- no edits needed below this line ---------------------\n// Emits one item per source, with the numeric category_id resolved.\nreturn SOURCES.map(s => {\n  const category_id = CATEGORIES[s.categorySlug];\n  if (category_id === undefined) {\n    throw new Error('Source \"' + s.name + '\" uses unknown categorySlug \"' + s.categorySlug + '\". Add it to CATEGORIES first.');\n  }\n  return { json: { name: s.name, feedUrl: s.feedUrl, lang: s.lang, categorySlug: s.categorySlug, category_id } };\n});"
+      },
+      "id": "prepare-sources",
+      "name": "Prepare Sources",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -448,
+        144
+      ],
+      "notes": "📰 EDIT ME — define your RSS feeds (SOURCES) and the slug → numeric category-ID map for your backend (CATEGORIES). Ships with 5 public example feeds.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "per-source",
+      "name": "Per Source",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -224,
+        144
+      ],
+      "notes": "Loops over sources one at a time so a single broken feed can't break the whole run. Output 1 = 'all done', Output 2 = next source."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "done",
+              "name": "message",
+              "value": "News scrape complete",
+              "type": "string"
+            },
+            {
+              "id": "finishedAt",
+              "name": "finishedAt",
+              "value": "={{ $now.toISO() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "done",
+      "name": "Done",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        0,
+        0
+      ],
+      "notes": "Final summary item once every source has been processed."
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.feedUrl }}",
+        "options": {
+          "customFields": "enclosure,media:content,media:thumbnail"
+        }
+      },
+      "id": "fetch-rss",
+      "name": "Fetch RSS",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        192
+      ],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "notes": "Reads the current source's feed. customFields exposes enclosure/media tags so Build Articles can pick a feed image. Continues on error so dead feeds don't stop the run."
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================================\n// BUILD ARTICLES -- normalize raw RSS items into article objects.\n// - Takes the newest N items per feed (CONFIG.maxItemsPerFeed)\n// - Skips items with no usable URL\n// - Skips items already published in a previous run (dedupe via\n//   workflow static data -- survives between executions)\n// - Generates one field set PER CONFIGURED LANGUAGE (title_<lang>,\n//   short_description_<lang>, description_<lang>). Fields matching the\n//   feed's own language are filled; the rest are left empty for the\n//   \"Translate\" node. The original text is also kept in source_* fields\n//   so translation works even when the feed language is not one of the\n//   configured output languages.\n// =====================================================================\nconst crypto = require('crypto');\nconst cfg = $('Config').first().json;\nconst source = $('Per Source').item.json;\n\n// Persistent dedupe store: { articleId: timestamp }.\n// NOTE: static data only persists for ACTIVE (scheduled/webhook) runs;\n// manual test runs always start fresh. See docs/architecture.md.\nconst sd = $getWorkflowStaticData('global');\nsd.seenIds = sd.seenIds || {};\n\nconst stripHtml = s => (s || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\\s+/g, ' ').trim();\nconst firstWords = (s, n) => { const w = (s || '').split(/\\s+/).filter(Boolean); return w.length <= n ? w.join(' ') : w.slice(0, n).join(' ') + '...'; };\n// Stable 16-char ID derived from the article URL -- used for dedupe.\nconst articleId = url => crypto.createHash('sha256').update(url).digest('hex').slice(0, 16);\n\n// Best image the FEED itself offers (enclosure / media:content / media:thumbnail).\n// If none, \"Resolve Image\" later falls back to the page's og:image.\nconst pickImage = j => {\n  if (j.enclosure && j.enclosure.url) return j.enclosure.url;\n  const mc = j['media:content']; if (mc && mc['$'] && mc['$'].url) return mc['$'].url;\n  const mt = j['media:thumbnail']; if (mt && mt['$'] && mt['$'].url) return mt['$'].url;\n  return '';\n};\n\nconst items = $input.all().slice(0, cfg.maxItemsPerFeed);\nconst out = [];\nlet skippedNoUrl = 0, skippedSeen = 0;\n\nfor (const it of items) {\n  const j = it.json || {};\n  const url = (j.link || j.guid || j.id || '').toString().trim();\n  if (!url) { skippedNoUrl++; continue; }\n  const id = articleId(url);\n  if (sd.seenIds[id]) { skippedSeen++; continue; }\n\n  const title = stripHtml(j.title) || '(untitled)';\n  const body = stripHtml(j.contentSnippet || j.content || j.summary || j.description || '');\n  const description = body || title;\n  const short_description = firstWords(body, cfg.shortDescriptionWords) || title;\n\n  // One field set per configured output language. Fields in the feed's\n  // own language are pre-filled; everything else stays '' for Translate.\n  const fields = {};\n  for (const l of cfg.languages) {\n    const own = (l === source.lang);\n    fields['title_' + l] = own ? title : '';\n    fields['short_description_' + l] = own ? short_description : '';\n    fields['description_' + l] = own ? description : '';\n  }\n\n  out.push({ json: Object.assign({\n    id,\n    category_id: source.category_id,\n    source_lang: source.lang,\n    source_url: url,\n    published_at: j.isoDate ? new Date(j.isoDate).toISOString() : new Date().toISOString(),\n    // Original feed text -- the translation source when the feed's\n    // language is not one of the configured output languages.\n    source_title: title,\n    source_short_description: short_description,\n    source_description: description,\n    rss_image: pickImage(j)\n  }, fields)});\n}\n\n// Nothing usable from this feed: emit a single marker item so the\n// \"Has Articles?\" IF node can route back to the loop with a reason.\nif (out.length === 0) {\n  const reason = items.length === 0 ? 'no_rss_items' : (skippedSeen === items.length ? 'all_already_seen' : 'no_usable_url');\n  return [{ json: { _skip: true, _reason: reason, source_name: source.name, source_category_id: source.category_id } }];\n}\nreturn out;"
+      },
+      "id": "build-articles",
+      "name": "Build Articles",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        192
+      ],
+      "alwaysOutputData": true,
+      "notes": "Normalizes RSS items into article objects: newest N items, dedupe against previously-posted IDs, one field set per configured language (feed's own language pre-filled, others left empty for Translate)."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json._skip }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              },
+              "rightValue": ""
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "has-articles",
+      "name": "Has Articles?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        448,
+        192
+      ],
+      "notes": "TRUE branch = feed produced nothing new (skip marker) → loop to next source. FALSE branch = real articles → enrich & publish."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "skipped",
+              "name": "skipped",
+              "value": true,
+              "type": "boolean"
+            },
+            {
+              "id": "source",
+              "name": "source_name",
+              "value": "={{ $json.source_name }}",
+              "type": "string"
+            },
+            {
+              "id": "reason",
+              "name": "reason",
+              "value": "={{ $json._reason }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "skip-source",
+      "name": "Skip Source",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        672,
+        144
+      ],
+      "notes": "Records WHY a source was skipped (no_rss_items / all_already_seen / no_usable_url) and hands control back to the loop."
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.source_url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (compatible; rss-news-publisher/1.0)"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "text"
+            }
+          },
+          "timeout": 8000
+        }
+      },
+      "id": "fetch-article-page",
+      "name": "Fetch Article Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        672,
+        336
+      ],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "notes": "Downloads the article's HTML page (8s timeout, never errors) so we can extract an og:image and the full article text. If it fails, the feed summary is used instead."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// =====================================================================\n// RESOLVE IMAGE + FULL TEXT -- enrich each article from its own page.\n// - Image: RSS image first, else og:image / twitter:image meta tags.\n// - Body:  extracts readable text from the page HTML (heuristic,\n//          no external libraries) and uses it only if it is LONGER\n//          than the feed's own summary (never regresses).\n// =====================================================================\nconst orig = $('Build Articles').item.json;\nconst html = ($json.data || '').toString();\nconst MAX_DESCRIPTION_CHARS = $('Config').first().json.maxDescriptionChars;\n\n// --- image: RSS enclosure first, else og:image / twitter:image ---\nlet image = orig.rss_image || '';\nif (!image) {\n  const m = html.match(/<meta[^>]+property=[\"']og:image[\"'][^>]+content=[\"']([^\"']+)[\"']/i)\n         || html.match(/<meta[^>]+content=[\"']([^\"']+)[\"'][^>]+property=[\"']og:image[\"']/i)\n         || html.match(/<meta[^>]+name=[\"']twitter:image[\"'][^>]+content=[\"']([^\"']+)[\"']/i);\n  if (m) image = m[1];\n}\n\n// --- full article text from the page HTML ---\nfunction decode(s) {\n  return s.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#39;/g, \"'\").replace(/&quot;/g, '\"').replace(/&lt;/g, '<').replace(/&gt;/g, '>');\n}\nfunction extractText(h) {\n  if (!h) return '';\n  let s = String(h);\n  // Drop script/style/noscript blocks entirely.\n  s = s.replace(/<script[\\s\\S]*?<\\/script>/gi, ' ').replace(/<style[\\s\\S]*?<\\/style>/gi, ' ').replace(/<noscript[\\s\\S]*?<\\/noscript>/gi, ' ');\n  // Prefer the <article> element when the page has one.\n  let scope = s;\n  const art = s.match(/<article[\\s\\S]*?<\\/article>/i);\n  if (art) scope = art[0];\n  // Collect substantial <p> paragraphs (>= 40 chars).\n  const blocks = scope.match(/<p[\\s\\S]*?<\\/p>/gi) || [];\n  const paras = [];\n  for (const b of blocks) {\n    const txt = decode(b.replace(/<[^>]*>/g, ' ')).replace(/\\s+/g, ' ').trim();\n    if (txt.length >= 40) paras.push(txt);\n  }\n  let text = paras.join('\\n\\n');\n  // Fallback: strip ALL tags if paragraph extraction found too little.\n  if (text.length < 200) {\n    text = decode(scope.replace(/<[^>]*>/g, ' ')).replace(/\\s+/g, ' ').trim();\n  }\n  return text;\n}\n\nlet articleText = extractText(html);\nif (articleText.length > MAX_DESCRIPTION_CHARS) {\n  articleText = articleText.slice(0, MAX_DESCRIPTION_CHARS).trim() + '…';\n}\n\nconst out = Object.assign({}, orig, { image });\n\n// Replace the SOURCE-language description with the fuller body, only when\n// the extraction beat the feed's own summary (never regress to shorter).\nif (articleText && articleText.length > (orig.source_description || '').length) {\n  out.source_description = articleText;\n  // If the source language is one of the output languages, its\n  // description field was pre-filled -- upgrade that too.\n  const key = 'description_' + orig.source_lang;\n  if (key in out && out[key]) out[key] = articleText;\n}\n\nreturn { json: out };"
+      },
+      "id": "resolve-image",
+      "name": "Resolve Image",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        336
+      ],
+      "notes": "Picks the best image (RSS image → og:image → twitter:image) and upgrades the description to the full page text when it's longer than the feed summary."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('Config').first().json.languages.some(l => !($json['title_' + l] || '').trim() || !($json['short_description_' + l] || '').trim() || !($json['description_' + l] || '').trim()) }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              },
+              "rightValue": ""
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "needs-translation",
+      "name": "Needs Translation?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1120,
+        336
+      ],
+      "notes": "TRUE = at least one configured language is still missing text → run the LLM. FALSE = everything already filled (e.g. default English-only with English feeds) → skip Translate entirely; no OpenAI key needed.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You localize news articles into multiple languages.\nYou receive:\n1. A JSON object of article fields. Each key ends with a language code suffix (e.g. title_en, description_es, short_description_ar). Some fields are filled, some are empty strings.\n2. The original source text of the article (title, short_description, description) and its language.\n\nRules:\n- For every EMPTY field, produce it by translating the corresponding source text (title -> title_<lang>, short_description -> short_description_<lang>, description -> description_<lang>) into the language indicated by the field's suffix.\n- For every NON-EMPTY field, return it UNCHANGED. Do not retranslate, rewrite, summarise, or \"improve\" filled fields.\n- Never leave a field empty.\n- Preserve named entities (people, places, brands). Do not add commentary.\n- Respond with ONLY a JSON object containing exactly the same keys as the input field object, all values as strings. No markdown, no extra keys, no explanations."
+            },
+            {
+              "content": "=Source language: {{ $json.source_lang }}\nTarget field object (fill the empty fields, return filled ones unchanged):\n\n{{ JSON.stringify(Object.fromEntries($('Config').first().json.languages.flatMap(l => [['title_' + l, $json['title_' + l] || ''], ['short_description_' + l, $json['short_description_' + l] || ''], ['description_' + l, $json['description_' + l] || '']])), null, 2) }}\n\nOriginal source text (translate from this):\n\n{{ JSON.stringify({ title: $json.source_title || '', short_description: $json.source_short_description || '', description: $json.source_description || '' }, null, 2) }}"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {
+          "maxTokens": 16384
+        }
+      },
+      "id": "translate",
+      "name": "Translate",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.3,
+      "position": [
+        1344,
+        432
+      ],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "notes": "🔑 SETUP ONLY IF you configure multiple languages or foreign-language feeds — attach your own OpenAI credential here. Fills ONLY the empty language fields; never rewrites filled ones. Keys are dynamic (one set per language), so output is prompt-enforced JSON parsed defensively in Build Payload. Swap the model if you prefer another. Continues on error: Build Payload has fallbacks.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// =====================================================================\n// BUILD PAYLOAD -- merge the article with the LLM translation (if any)\n// and produce the final object POSTed to your API.\n// Works for BOTH branches of \"Needs Translation?\": when translation was\n// skipped, $json is the article itself and its already-filled fields\n// are picked up the same way.\n// Defensive by design: if the LLM output is missing or malformed, the\n// article still goes out using sensible fallbacks -- every text field\n// is guaranteed non-empty.\n// =====================================================================\nconst cur = $('Resolve Image').item.json;\nconst cfg = $('Config').first().json;\nconst aiOut = $json;\n\nconst FIELD_TYPES = ['title', 'short_description', 'description'];\nconst KEYS = cfg.languages.flatMap(l => FIELD_TYPES.map(f => f + '_' + l));\n\n// Start from what we already have; LLM output only fills/overrides\n// fields it actually returned non-empty.\nlet t = {};\nfor (const k of KEYS) t[k] = cur[k] || '';\n\nconst looksLikePayload = (o) =>\n  o && typeof o === 'object' && !Array.isArray(o) &&\n  KEYS.filter((k) => k in o).length >= Math.min(2, KEYS.length);\n\n// The OpenAI node nests its result deep in the response (e.g.\n// output[0].content[0].text). Walk the whole response, parsing JSON\n// strings, and grab the first object carrying our language fields.\n// Depth-limited to avoid pathological inputs.\nfunction findPayload(nodeVal, depth) {\n  if (nodeVal == null || depth > 8) return null;\n  if (typeof nodeVal === 'string') {\n    const s = nodeVal.trim();\n    if (s.startsWith('{')) { try { return findPayload(JSON.parse(s), depth + 1); } catch (e) { return null; } }\n    return null;\n  }\n  if (typeof nodeVal !== 'object') return null;\n  if (looksLikePayload(nodeVal)) return nodeVal;\n  const children = Array.isArray(nodeVal) ? nodeVal : Object.values(nodeVal);\n  for (const c of children) {\n    const found = findPayload(c, depth + 1);\n    if (found) return found;\n  }\n  return null;\n}\n\nconst parsed = findPayload(aiOut, 0);\nif (parsed) {\n  for (const k of KEYS) {\n    if (parsed[k] != null && typeof parsed[k] === 'string' && parsed[k].trim()) t[k] = parsed[k];\n  }\n}\n\n// Many APIs require every text field to be NON-EMPTY. If a translation\n// came back empty, fall back per language: own field -> same field in\n// another configured language -> the original source text -> the title.\n// Guarantees no empty required field is ever POSTed.\nconst pick = (...vals) => { for (const v of vals) { if (typeof v === 'string' && v.trim()) return v; } return ''; };\nconst cap = (s, max) => { const v = s || ''; return v.length > max ? v.slice(0, max - 1).trim() + '…' : v; };\n\nconst langFields = {};\nfor (const l of cfg.languages) {\n  const others = (f) => cfg.languages.filter(x => x !== l).map(x => t[f + '_' + x]);\n  const title = pick(t['title_' + l], ...others('title'), cur.source_title);\n  const shortd = cap(pick(t['short_description_' + l], ...others('short_description'), cur.source_short_description, title), cfg.shortDescriptionMaxChars);\n  const desc = pick(t['description_' + l], ...others('description'), cur.source_description, shortd, title);\n  langFields['title_' + l] = title;\n  langFields['short_description_' + l] = shortd;\n  langFields['description_' + l] = desc;\n}\n\n// \"payload\" is exactly what POST Article sends to your API.\nreturn { json: {\n  id: cur.id,\n  payload: Object.assign({\n    category_id: Number(cur.category_id),\n    source_url: cur.source_url || '',\n    published_at: cur.published_at || new Date().toISOString(),\n    image: pick(cur.image, cfg.placeholderImage),\n    status: 2  // adjust to whatever \"published/pending\" status your API expects\n  }, langFields)\n}};"
+      },
+      "id": "build-payload",
+      "name": "Build Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1568,
+        336
+      ],
+      "notes": "Merges the translation (if any) into the article and builds the final API payload with one field set per configured language. Defensive: guarantees every text field is non-empty even if the LLM failed or was skipped."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.apiUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "={{ $('Config').first().json.authHeaderName }}",
+              "value": "={{ $('Config').first().json.authHeaderValue }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 15000
+        }
+      },
+      "id": "post-article",
+      "name": "POST Article",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1792,
+        336
+      ],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
+      "notes": "Sends the article to YOUR endpoint — URL, auth header and body (incl. per-language fields) all come from Config / Build Payload, nothing is hardcoded here. fullResponse + neverError let Mark Seen inspect the status code."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// =====================================================================\n// MARK SEEN -- record the article in the dedupe store ONLY if the\n// POST succeeded (2xx). Failed posts stay unmarked, so they are\n// retried automatically on the next run.\n// =====================================================================\nconst article = $('Build Payload').item.json;\nconst status = $json.statusCode || $json.status || 0;\nconst ok = status >= 200 && status < 300;\n\nif (!ok) {\n  console.log('POST failed for ' + article.id + ' status=' + status);\n  return { json: { id: article.id, posted: false, status } };\n}\n\nconst sd = $getWorkflowStaticData('global');\nsd.seenIds = sd.seenIds || {};\nsd.seenIds[article.id] = Date.now();\nreturn { json: { id: article.id, posted: true, status } };"
+      },
+      "id": "mark-seen",
+      "name": "Mark Seen",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2016,
+        416
+      ],
+      "notes": "Marks the article as published in the dedupe store only on a 2xx response, then loops back for the next source. Failed posts are retried next run."
+    }
+  ],
+  "connections": {
+    "Run": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Prepare Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Sources": {
+      "main": [
+        [
+          {
+            "node": "Per Source",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Per Source": {
+      "main": [
+        [
+          {
+            "node": "Done",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch RSS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch RSS": {
+      "main": [
+        [
+          {
+            "node": "Build Articles",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Articles": {
+      "main": [
+        [
+          {
+            "node": "Has Articles?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Articles?": {
+      "main": [
+        [
+          {
+            "node": "Skip Source",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch Article Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip Source": {
+      "main": [
+        [
+          {
+            "node": "Per Source",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Article Page": {
+      "main": [
+        [
+          {
+            "node": "Resolve Image",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve Image": {
+      "main": [
+        [
+          {
+            "node": "Needs Translation?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Translation?": {
+      "main": [
+        [
+          {
+            "node": "Translate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Translate": {
+      "main": [
+        [
+          {
+            "node": "Build Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Payload": {
+      "main": [
+        [
+          {
+            "node": "POST Article",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST Article": {
+      "main": [
+        [
+          {
+            "node": "Mark Seen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Seen": {
+      "main": [
+        [
+          {
+            "node": "Per Source",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
